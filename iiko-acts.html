@@ -39,7 +39,34 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 function base(){return $('server').value.trim().replace(/\/$/,'')}
 function setStatus(el,text,type=''){el.textContent=text;el.className='status '+type}
 function log(text,type=''){setStatus($('log'),text,type)}
-async function api(path,opt={}){let r=await fetch(base()+path,{...opt,headers:{...(opt.headers||{}),...(token?{Authorization:'Bearer '+token}:{})}});let text=await r.text();if(!r.ok)throw new Error(`${r.status}: ${text.slice(0,300)}`);try{return JSON.parse(text)}catch{return text}}
+async function api(path, opt = {}) {
+  const url = new URL(base() + path);
+
+  // Авторизация выдаёт токен; остальные запросы используют key.
+  if (token && url.pathname !== '/resto/api/auth') {
+    url.searchParams.set('key', token.trim());
+  }
+
+  const response = await fetch(url.toString(), {
+    ...opt,
+    mode: 'cors',
+    credentials: 'omit',
+    cache: 'no-store'
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    // Не выводим тело ответа: оно может содержать служебные данные.
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
 async function connect(){let login=$('login').value.trim(),pass=$('password').value;if(!base()||!login||!pass)return setStatus($('connectStatus'),'Заполните сервер, логин и пароль','err');$('connectBtn').disabled=true;setStatus($('connectStatus'),'Авторизация…');try{let hash=await sha1(pass);let data=await api('/resto/api/auth?login='+encodeURIComponent(login)+'&pass='+hash);token=typeof data==='string'?data:(data.token||data.key||'');let list=await api('/resto/api/corporation/stores');warehouses=Array.isArray(list)?list:(list.corporateItems||list.items||list.stores||[]);$('warehouse').innerHTML=warehouses.map(x=>`<option value="${esc(x.id||x.code||'')}">${esc(x.name||x.title||x.id||x.code)}</option>`).join('')||'<option value="">Склады не найдены</option>';$('warehouse').disabled=!warehouses.length;setStatus($('connectStatus'),'Подключение установлено','ok');log('Авторизация успешна. Склады загружены.','ok')}catch(e){token='';setStatus($('connectStatus'),'Ошибка подключения: '+e.message,'err');log('Не удалось подключиться. Проверьте URL, права и CORS.','err')}finally{$('connectBtn').disabled=false}}
 async function sha1(v){const b=new TextEncoder().encode(v),h=await crypto.subtle.digest('SHA-1',b);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('')}
 function parseCSV(text){let lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(x=>x.trim());if(lines.length&&/артикул/i.test(lines[0]))lines.shift();return lines.map((line,i)=>{let a=line.split(';').map(x=>x.trim());return {line:i+1,code:a[0]||'',name:a[1]||'',unit:a[2]||'',qty:a[3]||'',amount:a[7]||a[6]||'',valid:true}}).filter(x=>x.name||x.code||x.qty||x.amount)}
