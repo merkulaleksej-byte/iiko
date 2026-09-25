@@ -67,7 +67,190 @@ async function api(path, opt = {}) {
     return text;
   }
 }
-async function connect(){let login=$('login').value.trim(),pass=$('password').value;if(!base()||!login||!pass)return setStatus($('connectStatus'),'Заполните сервер, логин и пароль','err');$('connectBtn').disabled=true;setStatus($('connectStatus'),'Авторизация…');try{let hash=await sha1(pass);let data=await api('/resto/api/auth?login='+encodeURIComponent(login)+'&pass='+hash);token=typeof data==='string'?data:(data.token||data.key||'');let list=await api('/resto/api/corporation/stores');warehouses=Array.isArray(list)?list:(list.corporateItems||list.items||list.stores||[]);$('warehouse').innerHTML=warehouses.map(x=>`<option value="${esc(x.id||x.code||'')}">${esc(x.name||x.title||x.id||x.code)}</option>`).join('')||'<option value="">Склады не найдены</option>';$('warehouse').disabled=!warehouses.length;setStatus($('connectStatus'),'Подключение установлено','ok');log('Авторизация успешна. Склады загружены.','ok')}catch(e){token='';setStatus($('connectStatus'),'Ошибка подключения: '+e.message,'err');log('Не удалось подключиться. Проверьте URL, права и CORS.','err')}finally{$('connectBtn').disabled=false}}
+function parseStores(data) {
+  let items = [];
+
+  if (typeof data === 'string') {
+    const text = data.trim();
+
+    if (!text) {
+      throw new Error('Сервер вернул пустой ответ со складами.');
+    }
+
+    // Иногда JSON приходит как текст.
+    if (text.startsWith('[') || text.startsWith('{')) {
+      return parseStores(JSON.parse(text));
+    }
+
+    const xml = new DOMParser().parseFromString(
+      text,
+      'application/xml'
+    );
+
+    if (xml.querySelector('parsererror')) {
+      throw new Error('Ответ со складами не является корректным XML или JSON.');
+    }
+
+    // Ищем записи с непосредственными дочерними полями id и name,
+    // не привязываясь к названию XML-обёртки.
+    for (const element of xml.getElementsByTagName('*')) {
+      const fields = {};
+
+      for (const child of element.children) {
+        fields[child.localName] = child.textContent.trim();
+      }
+
+      if (fields.id && fields.name) {
+        items.push({
+          id: fields.id,
+          name: fields.name
+        });
+      }
+    }
+  } else if (Array.isArray(data)) {
+    items = data;
+  } else if (data && typeof data === 'object') {
+    // Поддержка вложенных JSON-обёрток.
+    function walk(value) {
+      if (Array.isArray(value)) {
+        value.forEach(walk);
+      } else if (value && typeof value === 'object') {
+        if (typeof value.id === 'string' &&
+            typeof value.name === 'string') {
+          items.push(value);
+        } else {
+          Object.values(value).forEach(walk);
+        }
+      }
+    }
+
+    walk(data);
+  }
+
+  // Удаляем некорректные записи и дубли по ID.
+  const unique = new Map();
+
+  for (const item of items) {
+    const id = String(item.id || '').trim();
+    const name = String(item.name || '').trim();
+
+    if (id && name) {
+      unique.set(id, { id, name });
+    }
+  }
+
+  return [...unique.values()].sort(
+    (a, b) => a.name.localeCompare(b.name, 'ru')
+  );
+}
+async function connect() {
+  const login = $('login').value.trim();
+  const password = $('password').value;
+  const select = $('warehouse');
+
+  if (!base() || !login || !password) {
+    setStatus(
+      $('connectStatus'),
+      'Заполните сервер, логин и пароль.',
+      'err'
+    );
+    return;
+  }
+
+  $('connectBtn').disabled = true;
+  select.disabled = true;
+  select.replaceChildren(new Option('Загрузка складов…', ''));
+
+  token = '';
+  warehouses = [];
+
+  let stage = 'Авторизация';
+
+  setStatus($('connectStatus'), 'Авторизация…');
+
+  try {
+    const hash = await sha1(password);
+
+    const auth = await api(
+      '/resto/api/auth?login=' +
+      encodeURIComponent(login) +
+      '&pass=' + encodeURIComponent(hash)
+    );
+
+    token = (
+      typeof auth === 'string'
+        ? auth
+        : String(auth?.token || auth?.key || '')
+    ).trim();
+
+    if (!token || token.startsWith('<')) {
+      throw new Error('Сервер не вернул ожидаемый токен.');
+    }
+
+    stage = 'Получение складов';
+
+    setStatus(
+      $('connectStatus'),
+      'Авторизация успешна. Получаю склады…'
+    );
+
+    const response = await api('/resto/api/corporation/stores');
+
+    stage = 'Разбор списка складов';
+    warehouses = parseStores(response);
+
+    if (!warehouses.length) {
+      select.replaceChildren(new Option('Склады не найдены', ''));
+
+      setStatus(
+        $('connectStatus'),
+        'Авторизация успешна, но список складов пуст или формат ответа не распознан.',
+        'warn'
+      );
+
+      log(
+        'Проверьте ответ запроса stores во вкладке Network. ' +
+        'Также проверьте доступ пользователя API к складам.',
+        'warn'
+      );
+
+      return;
+    }
+
+    select.replaceChildren(
+      new Option('Выберите склад', ''),
+      ...warehouses.map(store => new Option(store.name, store.id))
+    );
+
+    select.disabled = false;
+
+    // Если доступен только один склад, выбираем автоматически.
+    if (warehouses.length === 1) {
+      select.value = warehouses[0].id;
+    }
+
+    setStatus(
+      $('connectStatus'),
+      `Подключено. Найдено складов: ${warehouses.length}.`,
+      'ok'
+    );
+
+    log('Список складов загружен. Можно выбрать склад.', 'ok');
+  } catch (error) {
+    select.replaceChildren(new Option('Не удалось загрузить склады', ''));
+    select.disabled = true;
+
+    setStatus(
+      $('connectStatus'),
+      `${stage}: ${error.message}`,
+      'err'
+    );
+
+    log(`Ошибка на этапе «${stage}».`, 'err');
+  } finally {
+    $('connectBtn').disabled = false;
+  }
+}
 async function sha1(v){const b=new TextEncoder().encode(v),h=await crypto.subtle.digest('SHA-1',b);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('')}
 function parseCSV(text){let lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(x=>x.trim());if(lines.length&&/артикул/i.test(lines[0]))lines.shift();return lines.map((line,i)=>{let a=line.split(';').map(x=>x.trim());return {line:i+1,code:a[0]||'',name:a[1]||'',unit:a[2]||'',qty:a[3]||'',amount:a[7]||a[6]||'',valid:true}}).filter(x=>x.name||x.code||x.qty||x.amount)}
 function render(){let valid=0,err=0,total=0;$('rows').innerHTML=rows.length?rows.map(r=>{let q=Number(String(r.qty).replace(',','.')),amt=Number(String(r.amount).replace(',','.'));r.valid=!!r.name&&String(r.qty).trim()!==''&&Number.isFinite(q)&&q>0&&String(r.amount).trim()!==''&&Number.isFinite(amt)&&amt>=0;r.error=!r.valid?(r.name?'Проверьте количество и сумму':'Нет названия продукта'):'';if(r.valid){valid++;total+=amt}else err++;return `<tr><td><span class="pill ${r.valid?'ok':'bad'}">${r.valid?'Готово':esc(r.error)}</span></td><td>${esc(r.code)||'—'}</td><td>${esc(r.name)||'—'}</td><td>${esc(r.unit)||'—'}</td><td class="num">${esc(r.qty)||'—'}</td><td class="num">${esc(r.amount)||'—'}</td></tr>`}).join(''):'<tr><td colspan="6" style="text-align:center;color:#7b8794;padding:35px">Загрузите CSV, чтобы увидеть строки</td></tr>';$('rowCount').textContent=rows.length;$('validCount').textContent=valid;$('errorCount').textContent=err;$('totalAmount').textContent=total.toLocaleString('ru-RU',{minimumFractionDigits:2});$('xmlBtn').disabled=!valid||err>0;$('uploadBtn').disabled=!rows.length}
